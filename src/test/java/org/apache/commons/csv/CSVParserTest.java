@@ -1810,7 +1810,8 @@ class CSVParserTest {
         final CSVFormat csvFormat = CSVFormat.DEFAULT.builder().setDelimiter("[|]").setEscape('!').get();
         try (CSVParser csvParser = csvFormat.parse(new StringReader(source))) {
             CSVRecord csvRecord = csvParser.nextRecord();
-            assertEquals("a[|]b![|]c", csvRecord.get(0));
+            // "![" is an escaped delimiter character and unescapes to the bare "[".
+            assertEquals("a[|]b[|]c", csvRecord.get(0));
             assertEquals("xyz", csvRecord.get(1));
             csvRecord = csvParser.nextRecord();
             assertEquals("abc[abc]", csvRecord.get(0));
@@ -1901,7 +1902,8 @@ class CSVParserTest {
         final CSVFormat format = CSVFormat.DEFAULT.builder().setDelimiter("[|]").setEscape('!').get();
         try (CSVParser parser = format.parse(new StringReader("x![!|!]y![!|"))) {
             final CSVRecord record = parser.nextRecord();
-            assertEquals("x[|]y![!|", record.get(0));
+            // The truncated "![!|" is not a delimiter; its escaped delimiter characters unescape individually.
+            assertEquals("x[|]y[|", record.get(0));
             assertEquals(1, record.size());
         }
     }

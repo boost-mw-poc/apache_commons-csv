@@ -1482,6 +1482,20 @@ public final class CSVFormat implements Serializable {
     }
 
     /**
+     * Tests whether every character of the delimiter stays itself when individually escaped and read back. The letters used by control-character escape
+     * sequences ({@code r}, {@code n}, {@code t}, {@code b}, {@code f}) unescape to the control character, not to the letter, so a delimiter containing one of
+     * them cannot have a straddling prefix escaped losslessly and keeps the historical unescaped output.
+     */
+    private static boolean isDelimiterStraddleEscapable(final char[] delimiter) {
+        for (final char ch : delimiter) {
+            if (ch == 'r' || ch == 'n' || ch == 't' || ch == 'b' || ch == 'f') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
      * Returns true if the given character is a line break character.
      *
      * @param c The character to check.
@@ -1702,25 +1716,7 @@ public final class CSVFormat implements Serializable {
      * delimiter yields {@code |||}, which the greedy lexer splits one character early). Such a value must be encapsulated so the field boundary is unambiguous.
      */
     private boolean endsWithDelimiterPrefix(final CharSequence charSeq, final char[] delimiter, final int delimiterLength) {
-        if (delimiterLength < 2) {
-            return false;
-        }
-        final int len = charSeq.length();
-        for (int start = Math.max(0, len - delimiterLength + 1); start < len; start++) {
-            boolean match = true;
-            for (int j = 0; j < delimiterLength; j++) {
-                final int idx = start + j;
-                final char c = idx < len ? charSeq.charAt(idx) : delimiter[idx - len];
-                if (c != delimiter[j]) {
-                    match = false;
-                    break;
-                }
-            }
-            if (match) {
-                return true;
-            }
-        }
-        return false;
+        return indexOfDelimiterPrefix(charSeq, delimiter, delimiterLength) >= 0;
     }
 
     @Override
@@ -2093,6 +2089,33 @@ public final class CSVFormat implements Serializable {
     }
 
     /**
+     * Returns the index within {@code charSeq} where a straddling prefix of the delimiter begins, or -1 if the value does not end with one. Every character
+     * from the returned index to the end of the value takes part in a delimiter match that would start inside the value once the delimiter is appended, so an
+     * escaping printer must escape each of them individually. See {@link #endsWithDelimiterPrefix(CharSequence, char[], int)}.
+     */
+    private int indexOfDelimiterPrefix(final CharSequence charSeq, final char[] delimiter, final int delimiterLength) {
+        if (delimiterLength < 2) {
+            return -1;
+        }
+        final int len = charSeq.length();
+        for (int start = Math.max(0, len - delimiterLength + 1); start < len; start++) {
+            boolean match = true;
+            for (int j = 0; j < delimiterLength; j++) {
+                final int idx = start + j;
+                final char c = idx < len ? charSeq.charAt(idx) : delimiter[idx - len];
+                if (c != delimiter[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                return start;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * Tests whether comments are supported by this format.
      *
      * Note that the comment introducer character is only recognized at the start of a line.
@@ -2410,6 +2433,11 @@ public final class CSVFormat implements Serializable {
         final char quote = quoteSet ? getQuoteCharacter().charValue() : 0;
         final boolean commentMarkerSet = isCommentMarkerSet();
         final char commentChar = commentMarkerSet ? commentMarker.charValue() : 0; // Explicit unboxing is intentional
+        // A value ending in a straddling prefix of the delimiter must have every character of that prefix escaped:
+        // appended after the bare prefix, the delimiter would match one character early on read and shift the field
+        // boundary. This mirrors the endsWithDelimiterPrefix encapsulation in printWithQuotes.
+        final int prefixIndex = isDelimiterStraddleEscapable(delimArray) ? indexOfDelimiterPrefix(charSeq, delimArray, delimLength) : -1;
+        final int straddleStart = prefixIndex >= 0 ? prefixIndex : end;
         while (pos < end) {
             char c = charSeq.charAt(pos);
             final boolean isDelimiterStart = isDelimiter(c, charSeq, pos, delimArray, delimLength);
@@ -2417,7 +2445,7 @@ public final class CSVFormat implements Serializable {
             final boolean isLf = c == Constants.LF;
             // A leading comment marker would be read back as a comment, so escape it.
             final boolean isComment = commentMarkerSet && pos == 0 && c == commentChar;
-            if (isCr || isLf || c == escape || quoteSet && c == quote || isDelimiterStart || isComment) {
+            if (isCr || isLf || c == escape || quoteSet && c == quote || isDelimiterStart || isComment || pos >= straddleStart) {
                 // write out segment up until this char
                 if (pos > start) {
                     appendable.append(charSeq, start, pos);
@@ -2463,11 +2491,13 @@ public final class CSVFormat implements Serializable {
         final StringBuilder builder = new StringBuilder(IOUtils.DEFAULT_BUFFER_SIZE);
         int c;
         boolean firstChar = true;
+        boolean straddling = false;
+        final boolean straddleEscapable = isDelimiterStraddleEscapable(delimArray);
         final char[] lookAheadBuffer = new char[delimLength - 1];
         while (EOF != (c = bufferedReader.read())) {
             builder.append((char) c);
             Arrays.fill(lookAheadBuffer, (char) 0);
-            bufferedReader.peek(lookAheadBuffer);
+            final int lookAheadCount = Math.max(0, bufferedReader.peek(lookAheadBuffer));
             // Match the delimiter against the current character plus the look-ahead buffer only. Rebuilding the test
             // string from the whole accumulated builder made this loop O(n^2) for values without escapable characters.
             final String test = String.valueOf((char) c) + new String(lookAheadBuffer);
@@ -2477,7 +2507,16 @@ public final class CSVFormat implements Serializable {
             // A leading comment marker would be read back as a comment, so escape it.
             final boolean isComment = commentMarkerSet && firstChar && c == commentChar;
             firstChar = false;
-            if (isCr || isLf || c == escape || quoteSet && c == quote || isDelimiterStart || isComment) {
+            // Once the remaining stream is a straddling prefix of the delimiter, every remaining character must be
+            // escaped: appended after the bare prefix, the delimiter would match one character early on read and
+            // shift the field boundary. Such a prefix can only start once the end of the stream is within look-ahead
+            // range, so a short peek is a precondition. This mirrors the straddle handling in the CharSequence
+            // overload of printWithEscapes.
+            if (!straddling && straddleEscapable && lookAheadCount < delimLength - 1 &&
+                    indexOfDelimiterPrefix(String.valueOf((char) c) + new String(lookAheadBuffer, 0, lookAheadCount), delimArray, delimLength) == 0) {
+                straddling = true;
+            }
+            if (isCr || isLf || c == escape || quoteSet && c == quote || isDelimiterStart || isComment || straddling) {
                 // write out segment up until this char
                 if (pos > start) {
                     append(builder.substring(start, pos), appendable);

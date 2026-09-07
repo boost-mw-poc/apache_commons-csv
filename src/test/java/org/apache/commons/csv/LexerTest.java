@@ -436,7 +436,8 @@ class LexerTest {
     void testPartialEscapedMultiCharacterDelimiterAtEOF() throws IOException {
         final CSVFormat format = CSVFormat.DEFAULT.builder().setDelimiter("[|]").setEscape('!').get();
         try (Lexer lexer = createLexer("x![!|!]y![!|", format)) {
-            assertNextToken(EOF, "x[|]y![!|", lexer);
+            // The truncated "![!|" is not a delimiter; its escaped delimiter characters unescape individually.
+            assertNextToken(EOF, "x[|]y[|", lexer);
         }
     }
 

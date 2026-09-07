@@ -169,6 +169,21 @@ final class Lexer implements Closeable {
     }
 
     /**
+     * Tests whether the given character occurs in the delimiter.
+     *
+     * @param ch the character to test.
+     * @return true if the given character occurs in the delimiter.
+     */
+    private boolean isDelimiterChar(final int ch) {
+        for (final char delimiterChar : delimiter) {
+            if (ch == delimiterChar) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Tests if the given character indicates the end of the file.
      *
      * @return true if the given character indicates the end of the file.
@@ -512,8 +527,12 @@ final class Lexer implements Closeable {
         case EOF:
             throw new CSVException("EOF while processing escape sequence");
         default:
-            // Now check for meta-characters
-            if (isMetaChar(ch)) {
+            // 1) Now check for meta-characters
+            // 2) An escaped delimiter character unescapes to the bare character: the printer escapes each character of
+            //    a multi-character delimiter individually, including a straddling prefix of the delimiter at the end of
+            //    an unquoted value. A fully escaped delimiter never reaches this method: isEscapeDelimiter() consumes it
+            //    first.
+            if (isMetaChar(ch) || isDelimiterChar(ch)) {
                 return ch;
             }
             // indicate unexpected char - available from in.getLastChar()

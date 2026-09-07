@@ -71,6 +71,7 @@ import org.h2.tools.SimpleResultSet;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 /**
@@ -689,6 +690,80 @@ class CSVPrinterTest {
             printer.print("\\\\");
         }
         assertEquals("\\\\", sw.toString());
+    }
+
+    @Test
+    void testEscapeValueEndingWithDelimiterPrefix() throws IOException {
+        // No quoting available in escape mode, so a value ending in a straddling prefix of the multi-character
+        // delimiter must have that prefix escaped: appending the bare delimiter after "a|" yields "a|||", which
+        // reads back with the field boundary shifted one character early. Mirrors the endsWithDelimiterPrefix
+        // quoting fix for QuoteMode.MINIMAL.
+        final CSVFormat format = CSVFormat.DEFAULT.builder().setDelimiter("||").setQuote(null).setEscape('\\').get();
+        final StringWriter sw = new StringWriter();
+        try (CSVPrinter printer = new CSVPrinter(sw, format)) {
+            printer.printRecord("a|", "b");
+            printer.printRecord(new StringReader("a|"), new StringReader("b"));
+            // A delimiter prefix in the middle of a value cannot straddle the appended delimiter and is left alone.
+            printer.printRecord("a|b", "c");
+        }
+        final String string = sw.toString();
+        assertEquals("a\\|||b" + RECORD_SEPARATOR +
+                "a\\|||b" + RECORD_SEPARATOR +
+                "a|b||c" + RECORD_SEPARATOR, string);
+        // The emitted records must read back with the original field boundaries.
+        try (CSVParser parser = CSVParser.parse(string, format)) {
+            final List<CSVRecord> records = parser.getRecords();
+            assertEquals(3, records.size());
+            assertEquals("a|", records.get(0).get(0));
+            assertEquals("b", records.get(0).get(1));
+            assertEquals("a|", records.get(1).get(0));
+            assertEquals("b", records.get(1).get(1));
+            assertEquals("a|b", records.get(2).get(0));
+            assertEquals("c", records.get(2).get(1));
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "|||, a||, a\\|\\|",
+        "|||, ||, \\|\\|",
+        "|||, a|, a\\|",
+        "xyxy, axy, a\\x\\y",
+        "xyxy, ax, ax",
+        "[|], a[, a[",
+        "|||, a||z, a||z"
+    })
+    void testEscapeValueEndingWithLongDelimiterPrefix(final String delimiter, final String value, final String escaped) throws IOException {
+        final CSVFormat format = CSVFormat.DEFAULT.builder().setDelimiter(delimiter).setQuote(null).setEscape('\\').get();
+        final StringWriter sw = new StringWriter();
+        try (CSVPrinter printer = new CSVPrinter(sw, format)) {
+            printer.printRecord(value, "z");
+            printer.printRecord(new StringReader(value), new StringReader("z"));
+        }
+        final String expectedRecord = escaped + delimiter + "z" + RECORD_SEPARATOR;
+        assertEquals(expectedRecord + expectedRecord, sw.toString());
+        try (CSVParser parser = CSVParser.parse(sw.toString(), format)) {
+            final List<CSVRecord> records = parser.getRecords();
+            assertEquals(2, records.size());
+            for (final CSVRecord record : records) {
+                assertArrayEquals(new String[] { value, "z" }, record.values());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = { "rr", "nn", "tt", "bb", "ff" })
+    void testEscapeValueEndingWithUnescapableDelimiterPrefix(final String delimiter) throws IOException {
+        // Escaping these letters would turn them into control characters. Preserve the historical output.
+        final CSVFormat format = CSVFormat.DEFAULT.builder().setDelimiter(delimiter).setQuote(null).setEscape('\\').get();
+        final String value = "a" + delimiter.charAt(0);
+        final StringWriter sw = new StringWriter();
+        try (CSVPrinter printer = new CSVPrinter(sw, format)) {
+            printer.printRecord(value, "z");
+            printer.printRecord(new StringReader(value), new StringReader("z"));
+        }
+        final String expectedRecord = value + delimiter + "z" + RECORD_SEPARATOR;
+        assertEquals(expectedRecord + expectedRecord, sw.toString());
     }
 
     @Test
